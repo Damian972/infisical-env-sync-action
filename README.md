@@ -1,0 +1,1 @@
+# infisical-env-sync-action
