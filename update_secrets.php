@@ -8,24 +8,16 @@ if (!extension_loaded('sodium')) {
     exit(1);
 }
 
-$defaultConfig = [
-    'commonFolders' => [
-        '/', // root
-    ],
-    'environments' => [
-        'staging' => [
-            'infisicalEnvName' => 'staging',
-            'variableName' => '%s', // the format of the variable name, %s will be replaced with current variable
-            'folders' => [
-                '/',
-                'emtpy',
-                'frontend',
-            ],
-        ],
-    ],
-    'strict' => false,
-    'clean' => true,
-];
+echo '------------------------'."\n";
+
+try {
+    $config = validateConfigFile(getenv('INPUT_CONFIG_PATH'));
+    echo "[+] Configuration file loaded successfully\n";
+} catch (Throwable $e) {
+    echo "[-] Error while validating the configuration file. Error: {$e->getMessage()}\n";
+
+    exit(1);
+}
 
 $detectedEnvironment = getenv('TARGET_ENVIRONMENT');
 if (false === $detectedEnvironment) {
@@ -35,14 +27,14 @@ if (false === $detectedEnvironment) {
 }
 echo "[+] Detected environment: {$detectedEnvironment}\n";
 
-if (!isset($defaultConfig['environments'][$detectedEnvironment])) {
+if (!isset($config['environments'][$detectedEnvironment])) {
     echo "[-] No configuration found for environment: {$detectedEnvironment}. Exiting.\n";
 
     exit(1);
 }
 echo "[+] Configuration found for the targeted environment\n";
 
-$environmentConfig = $defaultConfig['environments'][$detectedEnvironment];
+$environmentConfig = $config['environments'][$detectedEnvironment];
 if (!isset($environmentConfig['infisicalEnvName'])) {
     echo "[!] No custom infisical environment name found. Using the environment name as infisical environment name.\n";
     $environmentConfig['infisicalEnvName'] = $detectedEnvironment;
@@ -50,7 +42,7 @@ if (!isset($environmentConfig['infisicalEnvName'])) {
 
 $foldersToCheck = array_map(
     fn (string $folder) => str_starts_with($folder, '/') ? $folder : "/{$folder}",
-    array_unique(array_merge($defaultConfig['commonFolders'], $environmentConfig['folders']))
+    array_unique(array_merge($config['commonFolders'], $environmentConfig['folders']))
 );
 if (0 === count($foldersToCheck)) {
     echo "[-] No folders to check for secrets on infisical: {$detectedEnvironment}. Exiting.\n";
@@ -78,11 +70,11 @@ foreach ($foldersToCheck as $folder) {
 
     try {
         $secrets = json_decode($output, true, flags: JSON_THROW_ON_ERROR);
-    } catch (\Throwable $e) {
+    } catch (Throwable $e) {
         echo "[-] Error while running command: {$command}\n";
         echo "{$output}\n";
 
-        if ($defaultConfig['strict']) {
+        if ($config['strict']) {
             exit(1);
         }
 
@@ -92,22 +84,28 @@ foreach ($foldersToCheck as $folder) {
     if (empty($secrets)) {
         echo "[-] No secrets found for folder: {$folder}\n";
 
-        if ($defaultConfig['strict']) {
+        if ($config['strict']) {
             exit(1);
         }
 
         continue;
     }
 
-    $computedSecrets = array_merge($computedSecrets, array_map(function (array $secret) use (&$computedSecretsNames, &$environmentConfig, &$folder) {
-        $computedSecretName = sprintf($environmentConfig['variableName'], computeSecretName($secret['key'], $folder));
-        $computedSecretsNames[] = $computedSecretName;
+    $computedSecrets = array_merge(
+        $computedSecrets,
+        array_map(function (array $secret) use (&$computedSecretsNames, &$environmentConfig, &$folder) {
+            $computedSecretName = sprintf(
+                '' === trim($environmentConfig['variableName']) ? '%s' : $environmentConfig['variableName'],
+                computeSecretName($secret['key'], $folder)
+            );
+            $computedSecretsNames[] = $computedSecretName;
 
-        return [
-            'name' => $computedSecretName,
-            'value' => $secret['value'],
-        ];
-    }, $secrets));
+            return [
+                'name' => $computedSecretName,
+                'value' => $secret['value'],
+            ];
+        }, $secrets)
+    );
 }
 
 $computedSecretsCount = count($computedSecrets);
@@ -136,7 +134,7 @@ echo sprintf(
     implode(', ', $computedSecretsNames)
 );
 
-if ($defaultConfig['clean']) {
+if ($config['clean']) {
     echo sprintf(
         "[+] Total secrets to remove: %d (%s)\n",
         $secretsNamesToRemoveCount,
@@ -155,10 +153,10 @@ foreach ($computedSecrets as $secret) {
             env: $detectedEnvironment
         );
         ++$secretsUpdated;
-    } catch (\Throwable $e) {
+    } catch (Throwable $e) {
         echo "[-] Error while setting secret {$secret['name']} on github. Error: {$e->getMessage()}\n";
 
-        if ($defaultConfig['strict']) {
+        if ($config['strict']) {
             exit(1);
         }
     }
@@ -166,15 +164,15 @@ foreach ($computedSecrets as $secret) {
 
 echo "[+] Total secrets updated: {$secretsUpdated}/{$computedSecretsCount}\n";
 
-if ($defaultConfig['clean']) {
+if ($config['clean']) {
     echo "[+] Cleaning {$secretsNamesToRemoveCount} secrets\n";
     foreach ($secretsNamesToRemove as $secretName) {
         try {
             removeGithubSecret($secretName, $detectedEnvironment);
-        } catch (\Throwable $e) {
+        } catch (Throwable $e) {
             echo "[-] Error while removing secret {$secretName} on github. Error: {$e->getMessage()}\n";
 
-            if ($defaultConfig['strict']) {
+            if ($config['strict']) {
                 exit(1);
             }
         }
@@ -196,20 +194,29 @@ function computeSecretName(string $baseName, string $folder): string
 }
 
 /**
- * @throws \RuntimeException
+ * @throws RuntimeException
  */
 function getAppNameFromEnvVariable(): string
 {
     $repository = getenv('GITHUB_REPOSITORY');
     if (false === $repository) {
-        throw new \RuntimeException('GITHUB_REPOSITORY env variable is not set.');
+        throw new RuntimeException('GITHUB_REPOSITORY env variable is not set.');
     }
 
     return explode('/', $repository)[1];
 }
 
+function getCurlHeaders(): array
+{
+    return [
+        'Accept: application/vnd.github.v3+json',
+        'Authorization: token '.getenv('REST_GITHUB_TOKEN'),
+        'User-Agent: '.getAppNameFromEnvVariable(),
+    ];
+}
+
 /**
- * @throws \RuntimeException
+ * @throws RuntimeException
  */
 function fetchGithubSecretsFromEnv(string $env, int $page = 1): array
 {
@@ -222,24 +229,20 @@ function fetchGithubSecretsFromEnv(string $env, int $page = 1): array
             $page
         ),
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_HTTPHEADER => [
-            'Accept: application/vnd.github.v3+json',
-            'Authorization: token '.getenv('REST_GITHUB_TOKEN'),
-            'User-Agent: '.getAppNameFromEnvVariable(),
-        ],
+        CURLOPT_HTTPHEADER => getCurlHeaders(),
     ]);
 
     $response = curl_exec($curl);
     $statusCode = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
 
     if (false === $response) {
-        throw new \RuntimeException(sprintf(
+        throw new RuntimeException(sprintf(
             'Error while fetching secrets from github. Error: %s',
             curl_error($curl)
         ));
     }
     if (200 !== $statusCode) {
-        throw new \RuntimeException(sprintf(
+        throw new RuntimeException(sprintf(
             'Error while fetching secrets from github. Status code: %d Response: %s',
             $statusCode,
             $response
@@ -258,7 +261,7 @@ function fetchGithubSecretsFromEnv(string $env, int $page = 1): array
 }
 
 /**
- * @throws \RuntimeException
+ * @throws RuntimeException
  */
 function fetchEnvironmentPublicKeyInfos(string $env): array
 {
@@ -270,24 +273,20 @@ function fetchEnvironmentPublicKeyInfos(string $env): array
             $env
         ),
         CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_HTTPHEADER => [
-            'Accept: application/vnd.github.v3+json',
-            'Authorization: token '.getenv('REST_GITHUB_TOKEN'),
-            'User-Agent: '.getAppNameFromEnvVariable(),
-        ],
+        CURLOPT_HTTPHEADER => getCurlHeaders(),
     ]);
 
     $response = curl_exec($curl);
     $statusCode = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
 
     if (false === $response) {
-        throw new \RuntimeException(sprintf(
+        throw new RuntimeException(sprintf(
             'Error while fetching secrets public key from github. Error: %s',
             curl_error($curl)
         ));
     }
     if (200 !== $statusCode) {
-        throw new \RuntimeException(sprintf(
+        throw new RuntimeException(sprintf(
             'Error while fetching secrets public key  from github. Status code: %d Response: %s',
             $statusCode,
             $response
@@ -312,7 +311,7 @@ function encryptGithubSecret(string $value, string $key): string
 }
 
 /**
- * @throws \RuntimeException
+ * @throws RuntimeException
  */
 function setGithubSecret(string $name, string $base64Secret, string $publicKeyId, string $env): void
 {
@@ -330,16 +329,12 @@ function setGithubSecret(string $name, string $base64Secret, string $publicKeyId
             'encrypted_value' => $base64Secret,
             'key_id' => $publicKeyId,
         ]),
-        CURLOPT_HTTPHEADER => [
-            'Accept: application/vnd.github.v3+json',
-            'Authorization: token '.getenv('REST_GITHUB_TOKEN'),
-            'User-Agent: '.getAppNameFromEnvVariable(),
-        ],
+        CURLOPT_HTTPHEADER => getCurlHeaders(),
     ]);
 
     $response = curl_exec($curl);
     if (false === $response) {
-        throw new \RuntimeException(sprintf(
+        throw new RuntimeException(sprintf(
             'Error while setting secret %s on github. Error: %s',
             $name,
             curl_error($curl)
@@ -348,7 +343,7 @@ function setGithubSecret(string $name, string $base64Secret, string $publicKeyId
 
     $statusCode = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
     if (201 !== $statusCode && 204 !== $statusCode) {
-        throw new \RuntimeException(sprintf(
+        throw new RuntimeException(sprintf(
             'Error while setting secret %s on github. Status code: %d',
             $name,
             $statusCode
@@ -359,7 +354,7 @@ function setGithubSecret(string $name, string $base64Secret, string $publicKeyId
 }
 
 /**
- * @throws \RuntimeException
+ * @throws RuntimeException
  */
 function removeGithubSecret(string $name, string $env): void
 {
@@ -373,16 +368,12 @@ function removeGithubSecret(string $name, string $env): void
         ),
         CURLOPT_RETURNTRANSFER => true,
         CURLOPT_CUSTOMREQUEST => 'DELETE',
-        CURLOPT_HTTPHEADER => [
-            'Accept: application/vnd.github.v3+json',
-            'Authorization: token '.getenv('REST_GITHUB_TOKEN'),
-            'User-Agent: '.getAppNameFromEnvVariable(),
-        ],
+        CURLOPT_HTTPHEADER => getCurlHeaders(),
     ]);
 
     $response = curl_exec($curl);
     if (false === $response) {
-        throw new \RuntimeException(sprintf(
+        throw new RuntimeException(sprintf(
             'Error while removing secret %s on github. Error: %s',
             $name,
             curl_error($curl)
@@ -391,7 +382,7 @@ function removeGithubSecret(string $name, string $env): void
 
     $statusCode = curl_getinfo($curl, CURLINFO_RESPONSE_CODE);
     if (204 !== $statusCode) {
-        throw new \RuntimeException(sprintf(
+        throw new RuntimeException(sprintf(
             'Error while removing secret %s on github. Status code: %d',
             $name,
             $statusCode
@@ -399,4 +390,49 @@ function removeGithubSecret(string $name, string $env): void
     }
 
     curl_close($curl);
+}
+
+function validateConfigFile(string $filePath): array
+{
+    if (!file_exists($filePath)) {
+        throw new RuntimeException('The configuration file does not exist.');
+    }
+
+    $config = require $filePath;
+
+    if (!is_array($config)) {
+        throw new RuntimeException('The configuration file must return an array.');
+    }
+
+    if (!array_key_exists('commonFolders', $config) || !array_key_exists('environments', $config)) {
+        throw new RuntimeException("The configuration file must contain 'commonFolders' and 'environments' keys.");
+    }
+
+    if (!is_array($config['commonFolders']) || !is_array($config['environments'])) {
+        throw new RuntimeException("The 'commonFolders' and 'environments' keys must be arrays.");
+    }
+
+    foreach ($config['environments'] as $environmentConfig) {
+        if (!is_array($environmentConfig)) {
+            throw new RuntimeException('The environment configuration must be an array.');
+        }
+
+        if (!array_key_exists('infisicalEnvName', $environmentConfig)
+            || !array_key_exists('variableName', $environmentConfig)
+            || !array_key_exists('folders', $environmentConfig)) {
+            throw new RuntimeException(
+                "The environment configuration must contain 'infisicalEnvName', 'variableName' and 'folders' keys."
+            );
+        }
+
+        if (!is_string($environmentConfig['infisicalEnvName'])
+            || !is_string($environmentConfig['variableName'])
+            || !is_array($environmentConfig['folders'])) {
+            throw new RuntimeException(
+                "The 'infisicalEnvName' and 'variableName' keys must be strings and the 'folders' key must be an array."
+            );
+        }
+    }
+
+    return $config;
 }

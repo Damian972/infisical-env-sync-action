@@ -1,0 +1,13 @@
+name: 'Infisical Env Sync Action'
+description: 'Syncs the secrets from Inficisal to the repository secrets environment'
+branding:
+    icon: 'info'
+    color: 'green'
+inputs:
+    config_path:
+        default: '.github/infisical-config.php'
+        description: 'Path to the configuration file'
+
+runs:
+    using: 'docker'
+    image: 'Dockerfile'
